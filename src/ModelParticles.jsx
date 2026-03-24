@@ -696,8 +696,6 @@
 // useGLTF.preload("/MOTOR(1).gltf");
 
 
-
-
 "use client";
 
 /**
@@ -718,31 +716,43 @@ import {
   useRef,
   useMemo,
   useEffect,
-  useState,
   Suspense,
   useCallback,
 } from "react";
 import { Canvas, useFrame } from "@react-three/fiber";
 import {
   useGLTF,
-  OrbitControls,
-  PerspectiveCamera,
+  PerspectiveCamera
 } from "@react-three/drei";
 import * as THREE from "three";
+
+/* ─────────────────────────────────────────────────────────────
+   GLOBAL CONTROLS (For camera parallax outside Canvas)
+───────────────────────────────────────────────────────────── */
+const _globalCameraMouse = new THREE.Vector2(0, 0);
+if (typeof window !== "undefined") {
+  window.addEventListener("mousemove", (e) => {
+    _globalCameraMouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+    _globalCameraMouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+  });
+}
 
 /* ─────────────────────────────────────────────────────────────
    CONFIG
 ───────────────────────────────────────────────────────────── */
 const MODEL_HUMAN_PATH = "/human/scene.gltf";
 const MODEL_MOTOR_PATH = "/MOTOR(1).gltf";
-const MAX_PARTICLES = 140_000;
+
+// Device detection for performance scaling
+const isMobile = typeof window !== "undefined" && window.innerWidth < 768;
+const MAX_PARTICLES = isMobile ? 45_000 : 90_000;
 const SCATTER_RADIUS = 10;
-const PARTICLE_SIZE = 0.018; // Much sharper definition, less blob-like
-const LERP_SPEED = 0.04;
+const PARTICLE_SIZE = isMobile ? 0.026 : 0.016;
+const LERP_SPEED = isMobile ? 0.05 : 0.04;
 const BG = "linear-gradient(90deg, #ffffff 35%, #000000 65%)"; // Smooth split background
 const COL_A = "#5af0ff";   // Unused now but kept for fallback
 const COL_B = "#ff4d6d";   // Unused now but kept for fallback
-const SCROLL_HEIGHT = "1200vh";     // total scrollable distance
+const SCROLL_HEIGHT = "1800vh";     // total scrollable distance // Increased by 50% for longer animation duration
 
 /* ─────────────────────────────────────────────────────────────
    VERTEX EXTRACTION
@@ -991,7 +1001,7 @@ function ParticleCloud({ targetA, targetB, scatter, vortex, phases, particleCoun
     let modelPresence = 1.0;
     if (t < 0.35) {
       // 0 to 1 during assembly
-      modelPresence = (t / 0.35) * (2 - (t / 0.35)); 
+      modelPresence = (t / 0.35) * (2 - (t / 0.35));
     } else if (t >= 0.8) {
       // 1 to 0 during scatter into vortex
       modelPresence = 1.0 - Math.min((t - 0.8) / 0.2, 1.0);
@@ -1043,6 +1053,17 @@ function ParticleCloud({ targetA, targetB, scatter, vortex, phases, particleCoun
 /* ─────────────────────────────────────────────────────────────
    SCENE — loads the GLTF, builds particle data
 ───────────────────────────────────────────────────────────── */
+const cameraKeyframes = [
+  { p: 0.00, pos: [0, 1, 1], look: [0, 1, -2] },     // Extremely close in the particle mist
+  { p: 0.15, pos: [4, 1.5, 4], look: [0, 0, 0] },    // Sweeping right as human forms
+  { p: 0.35, pos: [0, 0, 6], look: [0, 0, 0] },      // Centered on Human
+  { p: 0.43, pos: [0, 1, 1], look: [0, 1, -2] },     // Dive into human before morph
+  { p: 0.51, pos: [4, 1.5, 4], look: [0, 0, 0] },    // Sweeping right as motor forms
+  { p: 0.59, pos: [0, 0, 6], look: [0, 0, 0] },      // Centered on Motor
+  { p: 0.80, pos: [0, 0, 6], look: [0, 0, 0] },      // Hold on motor
+  { p: 1.00, pos: [0, -1, 14], look: [0, 0, 0] },    // Deep dramatic pull back as vortex expands
+];
+
 function Scene({ progress }) {
   const humanGltf = useGLTF(MODEL_HUMAN_PATH);
   const motorGltf = useGLTF(MODEL_MOTOR_PATH);
@@ -1056,30 +1077,53 @@ function Scene({ progress }) {
     return buildArrays(rawHuman, rawMotor, MAX_PARTICLES);
   }, [humanGltf, motorGltf]);
 
-  useFrame((_, delta) => {
+  const currentLookAt = useRef(new THREE.Vector3(0, 0, 0));
+
+  useFrame((state, delta) => {
     if (groupRef.current) {
       // A slow idle rotation so it feels alive
       timeRot.current += delta * 0.15;
-
-      // Snyc profound rotation to the scroll position
-      const targetScrollRot = progress.current * Math.PI * 8; // 4 full rotations over scroll length
-      scrollRot.current = THREE.MathUtils.lerp(scrollRot.current, targetScrollRot, 0.08);
-
-      groupRef.current.rotation.y = timeRot.current + scrollRot.current;
+      groupRef.current.rotation.y = timeRot.current;
     }
+
+    const t = progress.current;
+
+    // Evaluate camera position and lookAt
+    let targetP = cameraKeyframes[cameraKeyframes.length - 1].pos;
+    let targetL = cameraKeyframes[cameraKeyframes.length - 1].look;
+
+    for (let i = 0; i < cameraKeyframes.length - 1; i++) {
+      if (t >= cameraKeyframes[i].p && t <= cameraKeyframes[i + 1].p) {
+        const start = cameraKeyframes[i];
+        const end = cameraKeyframes[i + 1];
+        const localT = (t - start.p) / (end.p - start.p);
+        const smoothT = localT * localT * (3.0 - 2.0 * localT);
+        targetP = [
+          THREE.MathUtils.lerp(start.pos[0], end.pos[0], smoothT),
+          THREE.MathUtils.lerp(start.pos[1], end.pos[1], smoothT),
+          THREE.MathUtils.lerp(start.pos[2], end.pos[2], smoothT)
+        ];
+        targetL = [
+          THREE.MathUtils.lerp(start.look[0], end.look[0], smoothT),
+          THREE.MathUtils.lerp(start.look[1], end.look[1], smoothT),
+          THREE.MathUtils.lerp(start.look[2], end.look[2], smoothT)
+        ];
+        break;
+      }
+    }
+
+    // Gentle parallax
+    const plxX = _globalCameraMouse.x * 0.3;
+    const plxY = _globalCameraMouse.y * 0.3;
+
+    state.camera.position.lerp(new THREE.Vector3(targetP[0] + plxX, targetP[1] + plxY, targetP[2]), 0.05);
+    currentLookAt.current.lerp(new THREE.Vector3(targetL[0], targetL[1], targetL[2]), 0.05);
+    state.camera.lookAt(currentLookAt.current);
   });
 
   return (
     <>
       <PerspectiveCamera makeDefault position={[0, 0, 6]} fov={42} />
-      <OrbitControls
-        enableZoom={false}
-        enablePan={false}
-        maxPolarAngle={Math.PI * 0.8}
-        minPolarAngle={Math.PI * 0.2}
-        enableDamping
-        dampingFactor={0.08}
-      />
       <group ref={groupRef} scale={1.4}>
         <ParticleCloud
           targetA={data.targetA}
@@ -1095,21 +1139,7 @@ function Scene({ progress }) {
   );
 }
 
-/* ─────────────────────────────────────────────────────────────
-   LOADING FALLBACK — pulsing ring while GLTF streams
-───────────────────────────────────────────────────────────── */
-function LoadingRing() {
-  const ref = useRef();
-  useFrame(({ clock }) => {
-    if (ref.current) ref.current.rotation.y = clock.getElapsedTime() * 1.2;
-  });
-  return (
-    <mesh ref={ref}>
-      <torusGeometry args={[0.9, 0.012, 8, 80]} />
-      <meshBasicMaterial color={COL_A} transparent opacity={0.5} />
-    </mesh>
-  );
-}
+
 
 /* ─────────────────────────────────────────────────────────────
    MAIN PAGE
@@ -1117,7 +1147,6 @@ function LoadingRing() {
 export default function ModelParticlesPage() {
   const scrollRef = useRef(null);
   const progressRef = useRef(0);           // ref — no re-render on change
-  const [pct, setPct] = useState(0);        // state — drives UI only
 
   const text1Ref = useRef(null);
   const text2Ref = useRef(null);
@@ -1135,7 +1164,6 @@ export default function ModelParticlesPage() {
     const max = scrollHeight - clientHeight;
     const p = max > 0 ? Math.min(scrollTop / max, 1) : 0;
     progressRef.current = p;
-    setPct(Math.round(p * 100));
   }, []);
 
   useEffect(() => {
@@ -1267,6 +1295,11 @@ export default function ModelParticlesPage() {
           -webkit-text-fill-color: transparent;
           color: transparent;
         }
+        
+        .hardware-accelerated {
+          will-change: transform, opacity, filter;
+          transform: translateZ(0); /* Force GPU layer */
+        }
       `}</style>
 
       {/* ── Scroll container (transparent, sits above canvas) ── */}
@@ -1286,6 +1319,7 @@ export default function ModelParticlesPage() {
       {/* ── Text Overlay 1 ── */}
       <div
         ref={text1Ref}
+        className="hardware-accelerated"
         style={{
           position: "fixed",
           inset: 0,
@@ -1300,9 +1334,9 @@ export default function ModelParticlesPage() {
         <div className="text-gradient" style={{ fontFamily: "'DM Mono', monospace", fontSize: "clamp(12px, 1.2vw, 16px)", letterSpacing: "0.2em", marginBottom: "2vh" }}>
           CHAPTER 01/
         </div>
-        <h1 className="text-gradient" style={{ fontFamily: "'Playfair Display', serif", fontSize: "clamp(4rem, 12vw, 15rem)", fontWeight: 400, lineHeight: 1.1, margin: 0, paddingBottom: "2vw" }}>
+        <h1 className="text-gradient" style={{ fontFamily: "'Playfair Display', serif", fontSize: "clamp(3.5rem, 10vw, 12rem)", fontWeight: 400, lineHeight: 1.1, margin: 0, paddingBottom: "2vw" }}>
           Vincent<br />
-          <span style={{ marginLeft: "12vw" }}>van Gogh</span>
+          <span style={{ paddingLeft: "8vw" }}>van Gogh</span>
         </h1>
 
         <div className="text-gradient" style={{
@@ -1323,6 +1357,7 @@ export default function ModelParticlesPage() {
       {/* ── Text Overlay 2 ── */}
       <div
         ref={text2Ref}
+        className="hardware-accelerated"
         style={{
           position: "fixed",
           inset: 0,
@@ -1342,6 +1377,7 @@ export default function ModelParticlesPage() {
       {/* ── Text Overlay 3 ── */}
       <div
         ref={text3Ref}
+        className="hardware-accelerated"
         style={{
           position: "fixed",
           inset: 0,
@@ -1361,6 +1397,7 @@ export default function ModelParticlesPage() {
       {/* ── Text Overlay 4 ── */}
       <div
         ref={text4Ref}
+        className="hardware-accelerated"
         style={{
           position: "fixed",
           inset: 0,
@@ -1373,7 +1410,7 @@ export default function ModelParticlesPage() {
         }}
       >
         <div style={{ textAlign: "left" }}>
-          <h2 className="text-gradient" style={{ fontFamily: "'Playfair Display', serif", fontSize: "clamp(2.5rem, 8vw, 10rem)", fontWeight: 400, margin: 0, lineHeight: 1.1, whiteSpace: "nowrap" }}>
+          <h2 className="text-gradient" style={{ fontFamily: "'Playfair Display', serif", fontSize: "clamp(2.5rem, 8vw, 10rem)", fontWeight: 400, margin: 0, lineHeight: 1.1 }}>
             fractured<br />identity
           </h2>
         </div>
@@ -1382,6 +1419,7 @@ export default function ModelParticlesPage() {
       {/* ── Text Overlay 5 ── */}
       <div
         ref={text5Ref}
+        className="hardware-accelerated"
         style={{
           position: "fixed",
           inset: 0,
@@ -1401,6 +1439,7 @@ export default function ModelParticlesPage() {
       {/* ── Text Overlay 6 ── */}
       <div
         ref={text6Ref}
+        className="hardware-accelerated"
         style={{
           position: "fixed",
           inset: 0,
@@ -1420,6 +1459,7 @@ export default function ModelParticlesPage() {
       {/* ── Blob Background Layer ── */}
       <div
         ref={blobLayerRef}
+        className="hardware-accelerated"
         style={{
           position: "fixed",
           top: "50%", left: "50%",
@@ -1436,6 +1476,7 @@ export default function ModelParticlesPage() {
       {/* ── Text Overlay 7 ── */}
       <div
         ref={text7Ref}
+        className="hardware-accelerated"
         style={{
           position: "fixed", inset: 0, pointerEvents: "none", zIndex: 5,
           display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
@@ -1469,7 +1510,7 @@ export default function ModelParticlesPage() {
           style={{ background: "transparent" }}
           dpr={[1, 2]}
         >
-          <Suspense fallback={<LoadingRing />}>
+          <Suspense fallback={null}>
             <Scene progress={progressRef} />
           </Suspense>
         </Canvas>
